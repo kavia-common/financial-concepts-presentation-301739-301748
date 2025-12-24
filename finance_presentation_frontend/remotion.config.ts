@@ -5,46 +5,72 @@
  *
  * Note: When using the Node.JS APIs, the config file doesn't apply. Instead, pass options directly to the APIs
  */
-import { Config } from "@remotion/cli/config";
+import {Config} from '@remotion/cli/config';
 
 // Set desired defaults
-Config.setVideoImageFormat("jpeg");
+Config.setVideoImageFormat('jpeg');
 Config.setOverwriteOutput(true);
 
+// Common CORS headers used in all environments
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers':
+    'Content-Type, Authorization, X-Requested-With, Accept, Origin',
+  // Note: With wildcard origin, credentials are not allowed by spec. Keep as 'false'
+  'Access-Control-Allow-Credentials': 'false',
+  // Add vary to help proxies/CDNs where origin might vary
+  Vary: 'Origin',
+};
+
 /**
- * Configure permissive CORS for the Remotion Studio dev server by overriding the
- * underlying bundler (Vite/webpack) dev server headers. This ensures:
- * - Access-Control-Allow-Origin: *
- * - Access-Control-Allow-Methods
- * - Access-Control-Allow-Headers
- * Dev server will also handle OPTIONS automatically.
+ * In Remotion 4.0.286, ensure CORS by configuring webpack-dev-server
+ * (used by Remotion Studio/dev and preview server). We inject global headers
+ * and handle OPTIONS preflight using setupMiddlewares so every response
+ * includes the CORS headers and OPTIONS returns 204.
  */
 Config.overrideWebpackConfig((currentConfiguration) => {
-  // For both webpack-dev-server and Vite compatibility, we attempt to set headers
-  // on devServer if present, otherwise return config unchanged for production builds.
-  const cfg: any = { ...currentConfiguration };
+  const cfg: any = {...currentConfiguration};
 
-  // webpack-dev-server style
-  if (cfg.devServer) {
-    cfg.devServer.headers = {
-      ...(cfg.devServer.headers ?? {}),
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-Requested-With, Accept, Origin",
-      "Access-Control-Allow-Credentials": "false",
-    };
-  }
+  // Ensure devServer exists
+  cfg.devServer = cfg.devServer ?? {};
 
-  // Vite-style (if present via server.headers)
-  if (cfg.server) {
-    cfg.server.headers = {
-      ...(cfg.server.headers ?? {}),
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-Requested-With, Accept, Origin",
-      "Access-Control-Allow-Credentials": "false",
+  // Add global headers for all responses served by dev server (HTML, assets, HMR)
+  cfg.devServer.headers = {
+    ...(cfg.devServer.headers ?? {}),
+    ...CORS_HEADERS,
+  };
+
+  // Handle OPTIONS preflight early and ensure headers are present on the response
+  const existingSetup = cfg.devServer.setupMiddlewares;
+  cfg.devServer.setupMiddlewares = (middlewares: any[], devServer: any) => {
+    // Add our CORS middleware to the top
+    middlewares.unshift({
+      name: 'cors-preflight-handler',
+      middleware: (req: any, res: any, next: any) => {
+        // Always apply headers
+        Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        next();
+      },
+    });
+
+    // Chain any existing setupMiddlewares if present
+    if (typeof existingSetup === 'function') {
+      return existingSetup(middlewares, devServer);
+    }
+    return middlewares;
+  };
+
+  // Some environments may use a Vite-like server key; apply headers if present
+  if ((cfg as any).server) {
+    (cfg as any).server.headers = {
+      ...((cfg as any).server.headers ?? {}),
+      ...CORS_HEADERS,
     };
   }
 
